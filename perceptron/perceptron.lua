@@ -12,6 +12,7 @@ cmd:option('-N', 10, 'number of training samples')
 cmd:option('-T', 1000, 'number of trials')
 cmd:option('-plot', false, 'plot learning problem, live')
 cmd:option('-verbose', false, 'print intermediate info')
+cmd:option('-nn', false, 'use the nn package to represent the perceptron')
 cmd:text()
 if arg then opt = cmd:parse(arg) else opt = cmd:parse({}) end
 
@@ -26,37 +27,62 @@ function rand_line()
    local p2 = rand_point()
    local a = (p2[2] - p1[2])/(p2[1] - p1[1])
    local b = p1[2] - a*p1[1]
-   local l = torch.DoubleTensor({b, a, 1})
+   local l = torch.DoubleTensor({b, a, -1})
    return l
+end
+
+--- Returns the input point with an extra bias dimension set.
+function add_bias(p)
+   local x = torch.DoubleTensor({1, p[1], p[2]})
+   return x
+end
+
+--- Returns the class (1 or -1) of a point, given a separation line.
+function line_sep(l, p)
+   local x = add_bias(p)
+   local i = l:dot(x)
+   if (i > 0) then return 1 else return -1 end
 end
 
 --- Returns a perceptron, with weights initialized according to the
 --- given line or the line x2=0 by default.
 function perceptron(l)
-   l = l or torch.DoubleTensor({0, 0, 1})
-   local p = nn.Sequential()
-   p:add(nn.Linear(2, 1))
-   p:add(Sign())
-   local ws, _ = p:parameters()
-   ws[1][1][1] = l[2]
-   ws[1][1][2] = -l[3]
-   ws[2][1] = l[1]
-   return p
+   l = l or torch.DoubleTensor({0, 0, -1})
+   if opt.nn then
+      local p = nn.Sequential()
+      p:add(nn.Linear(2, 1))
+      p:add(Sign())
+      local ws, _ = p:parameters()
+      ws[1][1][1] = l[2]
+      ws[1][1][2] = l[3]
+      ws[2][1] = l[1]
+      return p
+   else
+      return l
+   end
 end
 
 --- Returns the parameters of the perceptron.
 function perceptron_params(p)
-   local ws, _ = p:parameters()
-   local a = ws[1][1][1]
-   local d = -ws[1][1][2]
-   local b = ws[2][1]
-   return b, a, d
+   if opt.nn then
+      local ws, _ = p:parameters()
+      local a = ws[1][1][1]
+      local d = ws[1][1][2]
+      local b = ws[2][1]
+      return b, a, d
+   else
+      return p[1], p[2], p[3]
+   end
 end
 
 --- Returns the parameters of the perceptron as a vector.
 function perceptron_vec(p)
-   local b, a, d = perceptron_params(p)
-   return torch.DoubleTensor({b, a, d})
+   if opt.nn then
+      local b, a, d = perceptron_params(p)
+      return torch.DoubleTensor({b, a, d})
+   else
+      return p
+   end
 end
 
 --- Returns a function from x1 to x2, which represents the perceptron
@@ -71,11 +97,15 @@ function perceptron_separation_line(p)
       min_x1 = -1
       max_x1 = 1
    end
-   return (function(x1) return (x1*a+b)/d end), torch.linspace(min_x1, max_x1)
+   return (function(x1) return (x1*a+b)/(-d) end), torch.linspace(min_x1, max_x1)
 end
 
 function sample_positive(si)
-   return si[2]:squeeze() > 0
+   if opt.nn then
+      return si[2]:squeeze() > 0
+   else
+      return si[2] > 0
+   end
 end
 
 function sample_x1(si)
@@ -95,7 +125,12 @@ function rand_samples(N, p)
       np = 0
       for i=1,N do
          local x = rand_point()
-         local y = p:forward(x):clone()
+         local y = false
+         if opt.nn then
+            y = p:forward(x):clone()
+         else
+            y = line_sep(p, x)
+         end
          s[i] = {x,y}
          if sample_positive(s[i]) then np = np + 1 end
       end
@@ -150,11 +185,19 @@ function train(N, plot)
 
    if plot then viz(s, p_true, p_learn) end
 
-   local criterion = SignCriterion()
+   local criterion = false
+   if opt.nn then
+      criterion = SignCriterion()
+   end
 
    local is_missclassified = function(si)
-      local pred = p_learn:forward(si[1])
-      return criterion:forward(pred, si[2]) > 0
+      if opt.nn then
+         local pred = p_learn:forward(si[1])
+         return criterion:forward(pred, si[2]) > 0
+      else
+         local pred = line_sep(p_learn, si[1])
+         return pred ~= si[2]
+      end
    end
    local all_missclassified = function()
       local missed_s, _ = partition_samples(s, is_missclassified)
@@ -167,10 +210,14 @@ function train(N, plot)
       local ri = torch.random(num_missed)
       local si = missed_s[ri]
 
-      criterion:forward(p_learn:forward(si[1]), si[2])
-      p_learn:zeroGradParameters()
-      p_learn:backward(si[1], criterion:backward(p_learn.output, si[2]))
-      p_learn:updateParameters(1)
+      if opt.nn then
+         criterion:forward(p_learn:forward(si[1]), si[2])
+         p_learn:zeroGradParameters()
+         p_learn:backward(si[1], criterion:backward(p_learn.output, si[2]))
+         p_learn:updateParameters(1)
+      else
+         p_learn = p_learn + add_bias(si[1])*si[2]
+      end
 
       num_iter = num_iter + 1
       if plot then viz(s, p_true, p_learn) end
